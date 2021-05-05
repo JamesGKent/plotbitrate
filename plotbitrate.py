@@ -50,7 +50,8 @@ from frame import Frame
 
 
 class Color(Enum):
-    I = "red"
+    IKey = "red"
+    I = "yellow"
     P = "green"
     B = "blue"
     AUDIO = "C2"
@@ -233,7 +234,7 @@ def open_ffprobe_get_frames(
          "-threads", str(multiprocessing.cpu_count()),
          "-print_format", "xml",
          "-show_entries",
-         "frame=pict_type,pkt_pts_time,best_effort_timestamp_time,pkt_size",
+         "frame=key_frame,pict_type,pkt_pts_time,best_effort_timestamp_time,pkt_size",
          file_path
          ],
         stdout=subprocess.PIPE)
@@ -260,19 +261,7 @@ def save_raw_xml(
         f.seek(0)
         f.truncate()
 
-        with subprocess.Popen(
-                ["ffprobe",
-                 "-hide_banner",
-                 "-loglevel", "error",
-                 "-select_streams", stream_selector,
-                 "-threads", str(multiprocessing.cpu_count()),
-                 "-print_format", "xml",
-                 "-show_entries",
-                 "format:frame=pict_type,pkt_pts_time,"
-                 "best_effort_timestamp_time,pkt_size",
-                 file_path
-                 ],
-                stdout=subprocess.PIPE) as p:
+        with open_ffprobe_get_frames(file_path, stream_selector) as p:
             assert p.stdout is not None
             # start process and iterate over output lines
             for line in p.stdout:
@@ -284,17 +273,19 @@ def save_raw_xml(
                 if not no_progress \
                         and duration > 0 \
                         and line.lstrip().startswith(b"<frame "):
-                    frame_time = \
-                        try_get_frame_time_from_node(eTree.fromstring(line))
-
-                    if frame_time is not None:
-                        percent = round((frame_time / duration) * 100.0, 1)
-                    else:
-                        percent = 0.0
-
-                    if percent > last_percent:
-                        print_progress(percent)
-                        last_percent = percent
+                    try:
+                        frame_time = \
+                            try_get_frame_time_from_node(eTree.fromstring(line))
+                        if frame_time is not None:
+                            percent = round((frame_time / duration) * 100.0, 1)
+                        else:
+                            percent = 0.0
+    
+                        if percent > last_percent:
+                            print_progress(percent)
+                            last_percent = percent
+                    except eTree.ParseError:
+                        pass
             if not no_progress:
                 print(flush=True)
 
@@ -405,6 +396,7 @@ def read_frame_data_gen_internal(
         time = try_get_frame_time_from_node(node)
         size = node.get("pkt_size")
         pict_type = node.get("pict_type")
+        key_frame = node.get("key_frame")
         # clear node to free parsed data
         node.clear()
 
@@ -412,7 +404,8 @@ def read_frame_data_gen_internal(
         yield Frame(
             time=time if time else 0,
             size=int(size) if size else 0,
-            pict_type=pict_type if pict_type else "?"
+            pict_type=pict_type if pict_type else "?",
+            key_frame=(key_frame=="1") if key_frame else False
         )
 
 
@@ -553,8 +546,8 @@ def add_stacked_areas(
 
     # calculate bitrate for each frame type
     # and add a stacking bar for each
-    for frame_type in ["I", "B", "P", "?"]:
-        filtered_frames = [f for f in frames_list if f.pict_type == frame_type]
+    for frame_type, is_key in [("I", True), ("I", False), ("B", False), ("P", False), ("?", False)]:
+        filtered_frames = [f for f in frames_list if ((f.pict_type == frame_type) and (f.key_frame == is_key))]
         if len(filtered_frames) == 0:
             continue
 
@@ -571,6 +564,8 @@ def add_stacked_areas(
                 sum(pair) for pair in zip(sums_of_values, values)
             ]
         sums_of_values = values_max
+        if is_key == True:
+            frame_type = frame_type + "Key"
         color = Color[frame_type].value if frame_type in dir(Color) \
             else Color.FRAME.value
         bars[frame_type] = matplot.fill_between(
@@ -674,7 +669,7 @@ def main():
     )
 
     if legend:
-        matplot.legend(legend.values(), legend.keys(), loc="upper right")
+        matplot.legend(legend.values(), legend.keys(), ncol=len(legend.keys()), loc="upper right", bbox_to_anchor=(1.0, 1.11))
 
     # render graph to file (if requested) or screen
     if args.output:
